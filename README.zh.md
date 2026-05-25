@@ -112,6 +112,10 @@ LARK_CHANNEL_AGENT=claude feishu-codex-bridge run
 
 Codex 运行时默认使用非交互模式并绕过确认，以便飞书消息能远程驱动本地 coding agent。建议至少设置 `/config` 里的管理员和用户白名单，避免陌生人控制你的本机环境。
 
+## 参考文档
+
+本项目基于 [`zarazhangrui/feishu-claude-code-bridge`](https://github.com/zarazhangrui/feishu-claude-code-bridge.git) 改造，默认后端切换为 Codex，并补充了 Codex session、图片、配置和文档支持。
+
 ## 许可
 
 MIT

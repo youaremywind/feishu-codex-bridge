@@ -111,6 +111,10 @@ Run `/new` after switching agents because Codex and Claude session ids are not c
 
 Codex runs non-interactively and bypasses local approval prompts so Feishu messages can drive the local coding agent. Configure `/config` access control, especially admin and user allowlists, before inviting the bot into shared chats.
 
+## References
+
+This project is adapted from [`zarazhangrui/feishu-claude-code-bridge`](https://github.com/zarazhangrui/feishu-claude-code-bridge.git), with the default backend changed to Codex and Codex-specific session, image, config, and documentation support added.
+
 ## License
 
 MIT
