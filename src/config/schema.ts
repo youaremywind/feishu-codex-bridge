@@ -1,3 +1,5 @@
+import type { AgentId } from '../agent';
+
 export type TenantBrand = 'feishu' | 'lark';
 
 /**
@@ -90,6 +92,8 @@ export interface AppAccess {
 }
 
 export interface AppPreferences {
+  /** Local coding agent backend. Default 'codex'. */
+  agent?: AgentId;
   /** Reply rendering mode for IM (group/p2p) messages. Default 'card'. */
   messageReply?: MessageReplyMode;
   /**
@@ -103,19 +107,19 @@ export interface AppPreferences {
   messageReplyMigrated?: boolean;
   /**
    * Whether to render tool-call blocks (Bash / Read / Edit / ...) in the
-   * output. Default true. Turn off if you only care about Claude's final
+   * output. Default true. Turn off if you only care about the agent's final
    * text answer and want to hide the "工具调用过程".
    */
   showToolCalls?: boolean;
   /**
-   * Cap on concurrent claude runs across all chats / topics. Excess runs
+   * Cap on concurrent agent runs across all chats / topics. Excess runs
    * queue FIFO. Default 10. Mostly relevant for topic groups where each
    * topic can spawn its own run; capping protects RAM / token spend.
    */
   maxConcurrentRuns?: number;
   /**
-   * Global default idle-timeout for claude runs, in minutes. When set,
-   * if claude emits no stream event for this long the bridge kills the
+   * Global default idle-timeout for agent runs, in minutes. When set,
+   * if the agent emits no stream event for this long the bridge kills the
    * run as presumed-hung. Undefined / 0 = no timeout (the default — runs
    * can hang indefinitely). Per-scope `/timeout` overrides this.
    */
@@ -124,7 +128,7 @@ export interface AppPreferences {
    * Whether the bot only responds to messages that @-mention it in groups
    * (regular and topic groups). p2p is always unrestricted. Default true:
    * groups are quiet unless the user @bot. Set false to let any group
-   * message reach Claude (the 0.1.21-and-earlier behavior).
+   * message reach the agent (the 0.1.21-and-earlier behavior).
    *
    * @全员 is never responded to regardless (SDK `respondToMentionAll: false`).
    * Cloud-doc comments still require @-mention unconditionally.
@@ -133,8 +137,8 @@ export interface AppPreferences {
   /** Access control — user/chat allowlists + admin gating. See AppAccess. */
   access?: AppAccess;
   /**
-   * Grace period (ms) between SIGTERM and SIGKILL when killing the claude
-   * subprocess. Bumped from a hardcoded 500ms because claude often has its
+   * Grace period (ms) between SIGTERM and SIGKILL when killing the agent
+   * subprocess. Bumped from a hardcoded 500ms because CLI agents often have their
    * own subprocesses (e.g. lark-cli mid-OAuth) that need a moment to clean
    * up — too short a window and the SIGKILL cascade kills the descendants
    * before they can finish what the user is waiting on. Default 5000ms.
@@ -181,6 +185,10 @@ export function secretKeyForApp(appId: string): string {
   return `app-${appId}`;
 }
 
+export function getAgentId(cfg: AppConfig): AgentId {
+  return cfg.preferences?.agent === 'claude' ? 'claude' : 'codex';
+}
+
 /**
  * Resolve the message-reply preference with default fallback + legacy coerce.
  *
@@ -209,7 +217,7 @@ export function getShowToolCalls(cfg: AppConfig): boolean {
 export function getMaxConcurrentRuns(cfg: AppConfig): number {
   const raw = cfg.preferences?.maxConcurrentRuns;
   if (typeof raw !== 'number' || !Number.isFinite(raw) || raw < 1) return 10;
-  // Reasonable upper bound — at 50+ concurrent claudes the bot box is
+  // Reasonable upper bound — at 50+ concurrent agents the bot box is
   // probably already RAM-starved. Clamp to keep typos from killing the box.
   return Math.min(Math.floor(raw), 50);
 }
@@ -230,7 +238,7 @@ export function getRequireMentionInGroup(cfg: AppConfig): boolean {
  * the user didn't really mean.
  */
 /**
- * Grace period before SIGKILL fallback when stopping a claude subprocess.
+ * Grace period before SIGKILL fallback when stopping an agent subprocess.
  * Returns ms. Defaults to 5000 (5 seconds). Clamps to [100, 30000] so a
  * typo can't either make stop() effectively SIGKILL-immediate or hang for
  * minutes.

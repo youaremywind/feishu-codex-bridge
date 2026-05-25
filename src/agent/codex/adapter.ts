@@ -1,26 +1,26 @@
 import type { ChildProcessByStdio } from 'node:child_process';
 import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
-import type { Readable } from 'node:stream';
+import type { Readable, Writable } from 'node:stream';
 import { log } from '../../core/logger';
 import { BRIDGE_SYSTEM_PROMPT } from '../shared/bridge-prompt';
 import type { AgentAdapter, AgentEvent, AgentRun, AgentRunOptions } from '../types';
-import { translateEvent } from './stream-json';
+import { translateEvent } from './json-events';
 
-export interface ClaudeAdapterOptions {
+export interface CodexAdapterOptions {
   binary?: string;
 }
 
-type ClaudeChild = ChildProcessByStdio<null, Readable, Readable>;
+type CodexChild = ChildProcessByStdio<Writable, Readable, Readable>;
 
-export class ClaudeAdapter implements AgentAdapter {
-  readonly id = 'claude';
-  readonly displayName = 'Claude Code';
+export class CodexAdapter implements AgentAdapter {
+  readonly id = 'codex';
+  readonly displayName = 'Codex';
 
   private readonly binary: string;
 
-  constructor(opts: ClaudeAdapterOptions = {}) {
-    this.binary = opts.binary ?? 'claude';
+  constructor(opts: CodexAdapterOptions = {}) {
+    this.binary = opts.binary ?? 'codex';
   }
 
   async isAvailable(): Promise<boolean> {
@@ -32,38 +32,25 @@ export class ClaudeAdapter implements AgentAdapter {
   }
 
   run(opts: AgentRunOptions): AgentRun {
-    const args = [
-      '-p',
-      opts.prompt,
-      '--output-format',
-      'stream-json',
-      '--verbose',
-      '--permission-mode',
-      opts.permissionMode ?? 'bypassPermissions',
-      '--append-system-prompt',
-      BRIDGE_SYSTEM_PROMPT,
-    ];
-    if (opts.sessionId) args.push('--resume', opts.sessionId);
-    if (opts.model) args.push('--model', opts.model);
-
+    const prompt = withBridgeInstructions(opts.prompt);
+    const args = buildArgs(opts);
     const child = spawn(this.binary, args, {
       cwd: opts.cwd,
-      env: { ...process.env, LARK_CHANNEL: '1' },
-      stdio: ['ignore', 'pipe', 'pipe'],
+      env: { ...process.env, LARK_CHANNEL: '1', FEISHU_CODEX_BRIDGE: '1' },
+      stdio: ['pipe', 'pipe', 'pipe'],
     });
 
+    child.stdin.end(prompt);
+
     log.info('agent', 'spawn', {
+      agent: this.id,
       pid: child.pid ?? null,
       cwd: opts.cwd ?? process.cwd(),
       hasSession: Boolean(opts.sessionId),
-      promptChars: opts.prompt.length,
+      promptChars: prompt.length,
       model: opts.model,
     });
 
-    // Listeners MUST be attached synchronously here, before we return.
-    // The 'error' and exit-related events can fire in the next tick; if we
-    // defer attachment to the async-generator body, those events fire into
-    // the void and the generator hangs.
     const stderrChunks: Buffer[] = [];
     let stderrBuffer = '';
     child.stderr.on('data', (chunk: Buffer) => {
@@ -73,7 +60,7 @@ export class ClaudeAdapter implements AgentAdapter {
       while (nl !== -1) {
         const line = stderrBuffer.slice(0, nl);
         stderrBuffer = stderrBuffer.slice(nl + 1);
-        if (line.trim()) log.warn('agent', 'stderr', { line });
+        if (line.trim()) log.warn('agent', 'stderr', { agent: this.id, line });
         nl = stderrBuffer.indexOf('\n');
       }
     });
@@ -83,26 +70,22 @@ export class ClaudeAdapter implements AgentAdapter {
       runtimeError = err;
     });
     child.on('exit', (code, signal) => {
-      log.info('agent', 'exit', { pid: child.pid ?? null, code, signal });
+      log.info('agent', 'exit', { agent: this.id, pid: child.pid ?? null, code, signal });
     });
 
-    // Default 5s if caller didn't specify — claude often has live
-    // subprocesses (lark-cli waiting for OAuth, long Bash, etc.) and the
-    // old 500ms was nowhere near enough for them to flush state before the
-    // SIGKILL cascade. Callers (channel.ts, /doctor) override per-run with
-    // a value derived from preferences.
     const stopGraceMs = opts.stopGraceMs ?? 5000;
 
     return {
       events: createEventStream(child, stderrChunks, () => runtimeError),
       async stop() {
         if (child.exitCode !== null || child.signalCode !== null) return;
-        log.info('agent', 'stop-sigterm', { pid: child.pid ?? null, graceMs: stopGraceMs });
+        log.info('agent', 'stop-sigterm', { agent: 'codex', pid: child.pid ?? null, graceMs: stopGraceMs });
         child.kill('SIGTERM');
         await new Promise<void>((resolve) => {
           const timer = setTimeout(() => {
             if (child.exitCode === null && child.signalCode === null) {
               log.warn('agent', 'stop-sigkill', {
+                agent: 'codex',
                 pid: child.pid ?? null,
                 graceMs: stopGraceMs,
                 reason: 'grace-period-expired',
@@ -118,9 +101,7 @@ export class ClaudeAdapter implements AgentAdapter {
         });
       },
       waitForExit(timeoutMs: number): Promise<boolean> {
-        if (child.exitCode !== null || child.signalCode !== null) {
-          return Promise.resolve(true);
-        }
+        if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve(true);
         return new Promise<boolean>((resolve) => {
           const onExit = (): void => {
             clearTimeout(timer);
@@ -137,18 +118,50 @@ export class ClaudeAdapter implements AgentAdapter {
   }
 }
 
+function buildArgs(opts: AgentRunOptions): string[] {
+  const common = [
+    '--json',
+    '--dangerously-bypass-approvals-and-sandbox',
+    '--skip-git-repo-check',
+  ];
+  if (opts.model) common.push('--model', opts.model);
+  for (const image of opts.attachments?.filter((a) => a.kind === 'image') ?? []) {
+    common.push('--image', image.path);
+  }
+
+  if (opts.sessionId) {
+    return [
+      ...(opts.cwd ? ['-C', opts.cwd] : []),
+      'exec',
+      'resume',
+      opts.sessionId,
+      ...common,
+      '-',
+    ];
+  }
+
+  return [
+    ...(opts.cwd ? ['-C', opts.cwd] : []),
+    'exec',
+    ...common,
+    '-',
+  ];
+}
+
+function withBridgeInstructions(prompt: string): string {
+  return `${BRIDGE_SYSTEM_PROMPT}\n\n---\n\n${prompt}`;
+}
+
 async function* createEventStream(
-  child: ClaudeChild,
+  child: CodexChild,
   stderrChunks: Buffer[],
   getError: () => Error | null,
 ): AsyncGenerator<AgentEvent> {
-  // If fork itself failed synchronously, child.pid is undefined. The 'error'
-  // event (ENOENT etc.) fires in the next tick, so also check getError().
   if (!child.pid) {
     const err = getError();
     yield {
       type: 'error',
-      message: err ? `failed to spawn claude: ${err.message}` : 'spawn returned no pid',
+      message: err ? `failed to spawn codex: ${err.message}` : 'spawn returned no pid',
     };
     return;
   }
@@ -170,9 +183,6 @@ async function* createEventStream(
     rl.close();
   }
 
-  // When the child is killed by a signal, exitCode stays null and signalCode
-  // carries the name. Both must be checked or we'll attach an 'exit' listener
-  // for an event that already fired and hang forever.
   const exitCode = await new Promise<number | null>((resolve) => {
     if (child.exitCode !== null || child.signalCode !== null) {
       resolve(child.exitCode);
@@ -185,8 +195,8 @@ async function* createEventStream(
   if (exitCode !== 0 && exitCode !== null) {
     const stderr = Buffer.concat(stderrChunks).toString('utf8').trim();
     const detail = stderr ? `: ${stderr.slice(0, 500)}` : '';
-    yield { type: 'error', message: `claude exited with code ${exitCode}${detail}` };
+    yield { type: 'error', message: `codex exited with code ${exitCode}${detail}` };
   } else if (runtimeError) {
-    yield { type: 'error', message: `claude runtime error: ${runtimeError.message}` };
+    yield { type: 'error', message: `codex runtime error: ${runtimeError.message}` };
   }
 }

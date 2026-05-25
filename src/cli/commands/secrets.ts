@@ -74,7 +74,7 @@ export async function runSecretsGet(): Promise<void> {
 
 export async function runSecretsSet(appId: string | undefined): Promise<void> {
   if (!appId) {
-    console.error('用法: lark-channel-bridge secrets set --app-id <id>');
+    console.error('用法: feishu-codex-bridge secrets set --app-id <id>');
     process.exit(1);
   }
   const id = `app-${appId}`;
@@ -84,7 +84,7 @@ export async function runSecretsSet(appId: string | undefined): Promise<void> {
     process.exit(1);
   }
   await setSecret(id, plaintext);
-  console.log(`✓ 已加密存到 ~/.lark-channel/secrets.enc`);
+  console.log(`✓ 已加密存到 ~/.feishu-codex-bridge/secrets.enc`);
 }
 
 export async function runSecretsList(): Promise<void> {
@@ -101,7 +101,7 @@ export async function runSecretsList(): Promise<void> {
 
 export async function runSecretsRemove(appId: string | undefined): Promise<void> {
   if (!appId) {
-    console.error('用法: lark-channel-bridge secrets remove --app-id <id>');
+    console.error('用法: feishu-codex-bridge secrets remove --app-id <id>');
     process.exit(1);
   }
   const id = `app-${appId}`;

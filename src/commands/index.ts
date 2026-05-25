@@ -14,6 +14,7 @@ import { forgetManagedCard, sendManagedCard, updateManagedCard } from '../card/m
 import { helpCard, resumeCard, statusCard, workspacesCard } from '../card/templates';
 import type { AppConfig, MessageReplyMode, TenantBrand } from '../config/schema';
 import {
+  getAgentId,
   getAgentStopGraceMs,
   getMaxConcurrentRuns,
   getMessageReplyMode,
@@ -357,7 +358,7 @@ async function handleResume(args: string, ctx: CommandContext): Promise<void> {
   const limit = Number.isFinite(n) && n > 0 && n <= 20 ? n : 5;
 
   const cwd = ctx.workspaces.cwdFor(ctx.scope) ?? homedir();
-  const sessions = await listRecentSessions(cwd, limit);
+  const sessions = await listRecentSessions(cwd, limit, ctx.agent.id === 'claude' ? 'claude' : 'codex');
   const currentSession = ctx.sessions.getRaw(ctx.scope);
   const entries = sessions.map((s) => ({
     sessionId: s.sessionId,
@@ -551,14 +552,14 @@ async function handleReconnect(_args: string, ctx: CommandContext): Promise<void
   }
 }
 
-const DOCTOR_INSTRUCTIONS = `你是 lark-channel-bridge 的诊断助理。下面会给你两段输入:
+const DOCTOR_INSTRUCTIONS = `你是 feishu-codex-bridge 的诊断助理。下面会给你两段输入:
 1. 用户的故障描述
 2. 最近的运行日志(JSON line 格式,旧→新)
 
 日志字段含义:
 - ts: ISO 时间戳
 - level: info | warn | error
-- phase: 模块阶段。常见值: ws(WebSocket), intake(消息入站), queue(去抖队列), flush(批处理), media(附件下载), prompt(prompt 组装), session(会话), agent(claude 子进程), card(卡片渲染), comment(文档评论), cardAction(卡片回调), command(斜杠命令), sdk(飞书 SDK 内部)
+- phase: 模块阶段。常见值: ws(WebSocket), intake(消息入站), queue(去抖队列), flush(批处理), media(附件下载), prompt(prompt 组装), session(会话), agent(agent 子进程), card(卡片渲染), comment(文档评论), cardAction(卡片回调), command(斜杠命令), sdk(飞书 SDK 内部)
 - event: enter | exit | transition | fail | 各 phase 自定义事件
 - traceId: 同一逻辑操作的串联 ID(同一条消息的多个日志会共享)
 - chatId: 飞书聊天 ID(用 chatId 反查相关日志)
@@ -608,9 +609,8 @@ async function handleDoctor(args: string, ctx: CommandContext): Promise<void> {
     );
     return;
   }
-  // Scrub identifying / credential material before the logs (a) reach
-  // Anthropic via the agent prompt, and (b) end up in any card payload
-  // Lark may cache server-side.
+  // Scrub identifying / credential material before logs reach the agent or
+  // card payloads. Lark may cache server-side; keep only coarse metadata.
   const logs = sanitizeLogsForDoctor(rawLogs);
 
   // In group / topic chats other members would see the result card. Ack
@@ -653,7 +653,7 @@ async function handleDoctor(args: string, ctx: CommandContext): Promise<void> {
                 }
                 state = reduce(state, evt);
                 await flush();
-                // Don't wait for stdout to close — some claude versions hang
+                // Don't wait for stdout to close — some agents hang
                 // briefly post-result, which would leave the for-await stuck.
                 if (state.terminal !== 'running') break;
               }
@@ -892,6 +892,7 @@ async function showConfigForm(ctx: CommandContext): Promise<void> {
   const ms = getRunIdleTimeoutMs(ctx.controls.cfg);
   const access = ctx.controls.cfg.preferences?.access ?? {};
   const card = configFormCard({
+    agent: getAgentId(ctx.controls.cfg),
     messageReply: getMessageReplyMode(ctx.controls.cfg),
     showToolCalls: getShowToolCalls(ctx.controls.cfg),
     maxConcurrentRuns: getMaxConcurrentRuns(ctx.controls.cfg),
@@ -920,6 +921,8 @@ async function cancelConfig(ctx: CommandContext): Promise<void> {
 
 async function submitConfig(ctx: CommandContext): Promise<void> {
   const fv = ctx.formValue ?? {};
+  const rawAgent = String(fv.agent ?? '').trim();
+  const agent = rawAgent === 'claude' ? 'claude' : 'codex';
   const rawReply = String(fv.message_reply ?? '').trim();
   const messageReply: MessageReplyMode =
     rawReply === 'markdown' || rawReply === 'text' || rawReply === 'card'
@@ -1035,6 +1038,7 @@ async function submitConfig(ctx: CommandContext): Promise<void> {
     // runAgentBatch's reads, so this takes effect on the next message.
     ctx.controls.cfg.preferences = {
       ...(ctx.controls.cfg.preferences ?? {}),
+      agent,
       messageReply,
       // Mark the messageReply value as living in the new (post-0.1.27)
       // semantic — `text` now means real plain text, not the lightweight
@@ -1061,6 +1065,7 @@ async function submitConfig(ctx: CommandContext): Promise<void> {
     }
 
     log.info('command', 'config-saved', {
+      agent,
       messageReply,
       showToolCalls,
       maxConcurrentRuns,
@@ -1075,6 +1080,7 @@ async function submitConfig(ctx: CommandContext): Promise<void> {
       channel,
       formMsgId,
       configSavedCard({
+        agent,
         messageReply,
         showToolCalls,
         maxConcurrentRuns,

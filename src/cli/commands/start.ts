@@ -1,14 +1,14 @@
 import dns from 'node:dns';
 import { createInterface } from 'node:readline';
 import pkg from '../../../package.json';
-import { ClaudeAdapter } from '../../agent/claude/adapter';
+import { createAgent, parseAgentId } from '../../agent';
 import { startChannel, type BridgeChannel } from '../../bot/channel';
 import { runRegistrationWizard } from '../../bot/wizard';
 import type { Controls } from '../../commands';
 import { setSecret } from '../../config/keystore';
 import { paths } from '../../config/paths';
 import type { AppConfig } from '../../config/schema';
-import { isComplete, secretKeyForApp } from '../../config/schema';
+import { getAgentId, isComplete, secretKeyForApp } from '../../config/schema';
 import {
   buildEncryptedAccountConfig,
   ensureSecretsGetterWrapper,
@@ -74,12 +74,24 @@ export async function runStart(opts: StartOptions): Promise<void> {
     console.log(`配置已保存到 ${configPath}\n`);
   }
 
+  const rawAgent = process.env.FEISHU_CODEX_BRIDGE_AGENT ?? process.env.LARK_CHANNEL_AGENT;
+  if (rawAgent) {
+    cfg.preferences = {
+      ...(cfg.preferences ?? {}),
+      agent: parseAgentId(rawAgent),
+    };
+  }
+
   await preFlightChecks({ skipCheckLarkCli: opts.skipCheckLarkCli });
 
-  const agent = new ClaudeAdapter();
+  const agent = createAgent(getAgentId(cfg));
   if (!(await agent.isAvailable())) {
-    console.error('✗ 未找到 claude CLI。请先安装 Claude Code：');
-    console.error('  https://docs.anthropic.com/en/docs/claude-code/quickstart');
+    console.error(`✗ 未找到 ${agent.displayName} CLI。请先安装并登录。`);
+    if (agent.id === 'codex') {
+      console.error('  https://github.com/openai/codex');
+    } else {
+      console.error('  https://docs.anthropic.com/en/docs/claude-code/quickstart');
+    }
     process.exit(1);
   }
 
@@ -151,6 +163,17 @@ export async function runStart(opts: StartOptions): Promise<void> {
         console.log(
           `[restart] connecting new bridge with appId=${next.accounts.app.id} tenant=${next.accounts.app.tenant}...`,
         );
+        const rawAgent = process.env.FEISHU_CODEX_BRIDGE_AGENT ?? process.env.LARK_CHANNEL_AGENT;
+        if (rawAgent) {
+          next.preferences = {
+            ...(next.preferences ?? {}),
+            agent: parseAgentId(rawAgent),
+          };
+        }
+        const nextAgent = createAgent(getAgentId(next));
+        if (!(await nextAgent.isAvailable())) {
+          throw new Error(`未找到 ${nextAgent.displayName} CLI`);
+        }
         // Connect-before-disconnect: if the new bridge fails to come up
         // (e.g. network outage during a force-reconnect), throwing here
         // leaves the old bridge — and its keepalive timer — untouched, so
@@ -160,7 +183,7 @@ export async function runStart(opts: StartOptions): Promise<void> {
         // someone manually restarts it.
         const next_bridge = await startChannel({
           cfg: next,
-          agent,
+          agent: nextAgent,
           sessions,
           workspaces,
           controls,
@@ -302,7 +325,7 @@ async function maybeMigratePlaintextSecret(
       );
       await setSecret(secretKeyForApp(cfg.accounts.app.id), s);
       await saveConfig(next, configPath);
-      console.log('🔒 已把 App Secret 加密迁移到 ~/.lark-channel/secrets.enc');
+      console.log('🔒 已把 App Secret 加密迁移到 ~/.feishu-codex-bridge/secrets.enc');
       return next;
     } catch (err) {
       log.warn('config', 'migrate-encrypted-failed', {

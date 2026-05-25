@@ -1,6 +1,8 @@
+import type { AgentId } from '../agent';
 import type { MessageReplyMode } from '../config/schema';
 
 export interface ConfigFormOpts {
+  agent: AgentId;
   messageReply: MessageReplyMode;
   showToolCalls: boolean;
   maxConcurrentRuns: number;
@@ -26,13 +28,31 @@ export function configFormCard(opts: ConfigFormOpts): object {
           tag: 'markdown',
           content:
             '⚙️ **偏好设置**\n\n' +
-            '调整 bot 的行为偏好。改完点提交,**立即生效**(无需重启)并写入 `~/.lark-channel/config.json`。',
+            '调整 bot 的行为偏好。改完点提交,**立即生效**(无需重启)并写入 `~/.feishu-codex-bridge/config.json`。',
         },
         { tag: 'hr' },
         {
           tag: 'form',
           name: 'config_form',
           elements: [
+            {
+              tag: 'markdown',
+              content:
+                '**Agent 后端**\n' +
+                '_Codex:默认使用本地 `codex` CLI_\n' +
+                '_Claude:兼容原 `claude` CLI_\n' +
+                '_切换后新会话生效;已有 session id 通常不能跨 agent 复用,建议同时 `/new`_',
+            },
+            {
+              tag: 'select_static',
+              name: 'agent',
+              initial_option: opts.agent,
+              options: [
+                { text: { tag: 'plain_text', content: 'Codex(默认)' }, value: 'codex' },
+                { text: { tag: 'plain_text', content: 'Claude Code' }, value: 'claude' },
+              ],
+            },
+            { tag: 'hr' },
             {
               tag: 'markdown',
               content:
@@ -126,7 +146,7 @@ export function configFormCard(opts: ConfigFormOpts): object {
               content:
                 '\n**用户白名单**(`allowedUsers`)\n' +
                 '_只允许列表内的 open_id 跟 bot 交互。多个用英文逗号分隔。留空 = 不限制_\n' +
-                '_open_id 可从日志 `~/.lark-channel/logs/*.log` 里 grep `senderId` 字段_',
+                '_open_id 可从日志 `~/.feishu-codex-bridge/logs/*.log` 里 grep `senderId` 字段_',
             },
             {
               tag: 'input',
@@ -223,6 +243,7 @@ export function configSavedCard(opts: ConfigFormOpts): object {
           tag: 'markdown',
           content:
             '✅ **偏好已保存**\n\n' +
+            `**Agent 后端**:\`${opts.agent}\`\n` +
             `**消息回复方式**:${replyLabel}\n` +
             `**工具调用显示**:\`${opts.showToolCalls ? 'show' : 'hide'}\`\n` +
             `**并发上限**:\`${opts.maxConcurrentRuns}\`\n` +

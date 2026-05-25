@@ -49,6 +49,7 @@ export async function runRegistrationWizard(): Promise<AppConfig> {
   // operator can tighten via /config later.
   if (operatorOpenId) {
     cfg.preferences = {
+      agent: 'codex',
       access: { admins: [operatorOpenId] },
     };
     console.log(`  Admin:   ${operatorOpenId} (你自己，已自动加入管理员名单)`);

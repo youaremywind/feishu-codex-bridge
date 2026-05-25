@@ -3,6 +3,7 @@ import { readdir, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
+import type { AgentId } from '../agent';
 
 export interface SessionSummary {
   sessionId: string;
@@ -20,7 +21,11 @@ function claudeProjectDir(cwd: string): string {
 }
 
 /** Return the most recent `limit` jsonl sessions for the given cwd, newest first. */
-export async function listRecentSessions(cwd: string, limit = 5): Promise<SessionSummary[]> {
+export async function listRecentSessions(cwd: string, limit = 5, agent: AgentId = 'codex'): Promise<SessionSummary[]> {
+  return agent === 'claude' ? listClaudeSessions(cwd, limit) : listCodexSessions(cwd, limit);
+}
+
+async function listClaudeSessions(cwd: string, limit: number): Promise<SessionSummary[]> {
   const dir = claudeProjectDir(cwd);
   let files: string[];
   try {
@@ -51,13 +56,74 @@ export async function listRecentSessions(cwd: string, limit = 5): Promise<Sessio
   return Promise.all(
     sorted.map(async (entry) => {
       const sessionId = entry.file.replace(/\.jsonl$/, '');
-      const { preview, lineCount } = await summarize(entry.path);
+      const { preview, lineCount } = await summarizeClaude(entry.path);
       return { sessionId, mtime: entry.mtime, preview, lineCount };
     }),
   );
 }
 
-async function summarize(path: string): Promise<{ preview: string; lineCount: number }> {
+async function listCodexSessions(cwd: string, limit: number): Promise<SessionSummary[]> {
+  const root = join(homedir(), '.codex', 'sessions');
+  const files = await collectJsonl(root).catch((err) => {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return [];
+    throw err;
+  });
+  const candidates = await Promise.all(
+    files.map(async (path) => {
+      const meta = await readCodexMeta(path);
+      if (!meta || meta.cwd !== cwd) return null;
+      const st = await stat(path).catch(() => null);
+      if (!st) return null;
+      const { preview, lineCount } = await summarizeCodex(path);
+      return { sessionId: meta.id, mtime: st.mtimeMs, preview, lineCount };
+    }),
+  );
+  return candidates
+    .filter((x): x is SessionSummary => x !== null)
+    .sort((a, b) => b.mtime - a.mtime)
+    .slice(0, limit);
+}
+
+async function collectJsonl(dir: string): Promise<string[]> {
+  const entries = await readdir(dir, { withFileTypes: true });
+  const out: string[] = [];
+  for (const entry of entries) {
+    const path = join(dir, entry.name);
+    if (entry.isDirectory()) {
+      out.push(...await collectJsonl(path));
+    } else if (entry.isFile() && entry.name.endsWith('.jsonl')) {
+      out.push(path);
+    }
+  }
+  return out;
+}
+
+async function readCodexMeta(path: string): Promise<{ id: string; cwd: string } | null> {
+  const stream = createReadStream(path, { encoding: 'utf8' });
+  const rl = createInterface({ input: stream });
+  try {
+    for await (const line of rl) {
+      try {
+        const obj = JSON.parse(line) as { type?: string; payload?: { id?: unknown; cwd?: unknown } };
+        if (obj.type === 'session_meta') {
+          const id = obj.payload?.id;
+          const cwd = obj.payload?.cwd;
+          if (typeof id === 'string' && typeof cwd === 'string') return { id, cwd };
+          return null;
+        }
+      } catch {
+        return null;
+      }
+      break;
+    }
+  } finally {
+    rl.close();
+    stream.destroy();
+  }
+  return null;
+}
+
+async function summarizeClaude(path: string): Promise<{ preview: string; lineCount: number }> {
   const stream = createReadStream(path, { encoding: 'utf8' });
   const rl = createInterface({ input: stream });
   let preview = '';
@@ -69,14 +135,13 @@ async function summarize(path: string): Promise<{ preview: string; lineCount: nu
         try {
           const obj = JSON.parse(line) as { type?: string; message?: { content?: unknown } };
           if (obj.type === 'user' && obj.message) {
-            const text = extractUserText(obj.message.content);
+            const text = extractClaudeUserText(obj.message.content);
             if (text) preview = text.slice(0, 80);
           }
         } catch {
           /* malformed line */
         }
       }
-      // reading the whole file is fine — sessions are usually under 10k lines
       if (lineCount > 20_000) break;
     }
   } finally {
@@ -86,7 +151,35 @@ async function summarize(path: string): Promise<{ preview: string; lineCount: nu
   return { preview: preview || '(空会话)', lineCount };
 }
 
-function extractUserText(content: unknown): string {
+async function summarizeCodex(path: string): Promise<{ preview: string; lineCount: number }> {
+  const stream = createReadStream(path, { encoding: 'utf8' });
+  const rl = createInterface({ input: stream });
+  let preview = '';
+  let lineCount = 0;
+  try {
+    for await (const line of rl) {
+      lineCount++;
+      if (!preview && line.includes('"type":"event_msg"')) {
+        try {
+          const obj = JSON.parse(line) as { type?: string; payload?: { type?: string; message?: unknown } };
+          if (obj.type === 'event_msg' && obj.payload?.type === 'user_message') {
+            const msg = obj.payload.message;
+            if (typeof msg === 'string' && msg.trim()) preview = msg.trim().slice(0, 80);
+          }
+        } catch {
+          /* malformed line */
+        }
+      }
+      if (lineCount > 20_000) break;
+    }
+  } finally {
+    rl.close();
+    stream.destroy();
+  }
+  return { preview: preview || '(空会话)', lineCount };
+}
+
+function extractClaudeUserText(content: unknown): string {
   if (typeof content === 'string') return content.trim();
   if (Array.isArray(content)) {
     for (const block of content) {
@@ -113,7 +206,7 @@ export function formatRelTime(mtime: number): string {
   if (hr < 24) return `${hr} 小时前`;
   const day = Math.floor(hr / 24);
   if (day === 1) return '昨天';
-  if (day < 30) return `${day} 天前`;
+  if (day < 30) return `${day} 天`;
   const mo = Math.floor(day / 30);
   return `${mo} 个月前`;
 }
